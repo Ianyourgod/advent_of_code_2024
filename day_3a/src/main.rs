@@ -6,10 +6,10 @@ fn main() {
     let mut cur_idx = 0;
     let mut enabled = true;
     while cur_idx < input.len() {
-        println!("cur_idx: {}, len {}", cur_idx, input.len());
         let cur_char = input.chars().nth(cur_idx).unwrap();
 
         // look for mul(X,Y)
+
 
         if enabled && cur_char == 'm' &&
             input.chars().nth(cur_idx+1) == Some('u') &&
