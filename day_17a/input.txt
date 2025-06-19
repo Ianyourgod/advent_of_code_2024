@@ -1,0 +1,9 @@
+Register A: 64012472
+Register B: 0
+Register C: 0
+
+Program: 2,4,1,7,7,5,0,3,1,7,4,1,5,5,3,0
+
+b=a%8 // get first 3 bits
+b=b^7 // xor by 7
+c=a/(2^b)
