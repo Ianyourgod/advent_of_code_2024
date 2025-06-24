@@ -16,7 +16,7 @@ pub enum GateType {
 }
 
 impl GateType {
-    pub fn new(gate: &str) -> Self {
+    pub fn from_str(gate: &str) -> Self {
         match gate {
             "AND" => Self::And,
             "XOR" => Self::Xor,
@@ -26,24 +26,123 @@ impl GateType {
     }
 }
 
-fn follows_rule_1(gate: &Gate) -> bool {
-    if gate.output.starts_with('z') && !gate.output.ends_with("45") {
-        gate.gate == GateType::Xor
-    } else {
-        true
-    }
-}
-
-fn follows_rule_2(gate: &Gate) -> bool {
-    let left_is_xy = gate.left.starts_with('x') || gate.left.starts_with('y');
-    let right_is_xy = gate.right.starts_with('x') || gate.right.starts_with('y');
-
-    (gate.output.starts_with('z') || left_is_xy || right_is_xy) || gate.gate != GateType::Xor
-}
-
 fn main() {
+    use std::time::Instant;
+
     let input = std::fs::read_to_string("input.txt").unwrap();
 
+    println!("PART 1:");
+
+    let p1_start = Instant::now();
+
+    {
+        println!("{}", part_1(&input));
+    }
+
+    let time_taken = p1_start.elapsed();
+    println!("\nPART 1 took: {:.2?}", time_taken);
+
+    println!("\nPART 2:");
+
+    let p2_start = Instant::now();
+
+    {
+        println!("{}", part_2(&input));
+    }
+
+    let time_taken = p2_start.elapsed();
+    println!("\nPART 2 took: {:.2?}", time_taken);
+}
+
+fn part_1(input: &str) -> u64 {
+    let mut vals = HashMap::new();
+
+    let parts = input.split("\n\n").collect::<Vec<&str>>();
+
+    for starting_val in parts[0].split('\n') {
+        let mut parts = starting_val.split(": ");
+
+        let name = parts.next().unwrap().to_string();
+        let val = if parts.next().unwrap() == "1" { true } else { false };
+
+        vals.insert(name.clone(), val);
+    }
+
+    let mut gates = vec![];
+
+    for gate in parts[1].split('\n') {
+        let mut parts = gate.split(' ');
+
+        let left = parts.next().unwrap().to_string();
+        let gate = parts.next().unwrap().to_string();
+        let right = parts.next().unwrap().to_string();
+        let output = parts.last().unwrap().to_string();
+
+        gates.push(Gate {
+            gate: GateType::from_str(&gate),
+            left,
+            right,
+            output,
+        });
+    }
+
+    get_true_output(&gates, vals)
+}
+
+fn get_true_output(gates: &Vec<Gate>, mut vals: HashMap<String, bool>) -> u64 {
+    let mut completed_gates = 0;
+
+    let mut current_gate = 0;
+    while completed_gates < gates.len() {
+        let gate = gates.get(current_gate).unwrap();
+
+        if vals.contains_key(&gate.left) && vals.contains_key(&gate.right) && !vals.contains_key(&gate.output) {
+            completed_gates += 1;
+            let left = *vals.get(&gate.left).unwrap();
+            let right = *vals.get(&gate.right).unwrap();
+
+            let val = match gate.gate {
+                GateType::And => left && right,
+                GateType::Or => left || right,
+                GateType::Xor => left ^ right,
+            };
+
+            vals.insert(gate.output.clone(), val);
+        }
+
+        current_gate += 1;
+        if current_gate >= gates.len() {
+            current_gate = 0;
+        }
+    }
+
+    let mut zs = Vec::new();
+    for v in vals {
+        if v.0.starts_with('z') {
+            zs.push(v);
+        }
+    }
+
+    /*
+    For example |a, b| (a - b).cmp(a) is a comparison function that is neither transitive nor reflexive nor total, a < b < c < a with a = 1, b = 2, c = 3. For more information and examples see the [Ord] documentation.
+     */
+
+    zs.sort_by(|a,b| {
+        a.0.cmp(&b.0)
+    });
+
+    zs.reverse();
+
+    let mut z_val = 0;
+    for z in zs {
+        z_val *= 2;
+        z_val += if z.1 { 1 } else { 0 };
+    }
+
+    z_val
+}
+
+fn part_2(input: &str) -> String {
     let mut vals = HashMap::new();
 
     let parts = input.split("\n\n").collect::<Vec<&str>>();
@@ -81,7 +180,7 @@ fn main() {
     let z_num = x_num + y_num;
     let z_num_as_str = format!("{:b}", z_num);
 
-    println!("{}", z_num_as_str);
+    println!("Z:\n{}\n{}", z_num_as_str, z_num);
 
     let mut gates = vec![];
 
@@ -94,74 +193,26 @@ fn main() {
         let output = parts.last().unwrap().to_string();
 
         gates.push(Gate {
-            gate: GateType::new(&gate),
+            gate: GateType::from_str(&gate),
             left,
             right,
             output,
         });
     }
 
-    for (i, gate) in gates.iter().enumerate() {
-        if !follows_rule_1(gate) || !follows_rule_2(gate) {
-            println!("gate {} ({:?}) breaks rule {}", i, gate, if !follows_rule_1(gate) { '1' } else { '2' });
-        }
+    let true_z = get_true_output(&gates, vals.clone());
+
+    println!("TRUE Z:\n{:b}\n{}", true_z, true_z);
+
+    //let mut cur_bit = z_num_as_str.len()-1;
+    String::from("sigma_goon")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn part_1() {
+        let input = std::fs::read_to_string("input.txt").unwrap();
+        super::part_1(&input);
     }
-
-    while gates.len() > 0 {
-        let mut removing = None;
-        for (i, gate) in gates.iter().enumerate() {
-            let left = match vals.get(&gate.left) {
-                Some(val) => *val,
-                None => continue,
-            };
-
-            let right = match vals.get(&gate.right) {
-                Some(val) => *val,
-                None => continue,
-            };
-
-            let result = match gate.gate {
-                GateType::And => left & right,
-                GateType::Xor => left ^ right,
-                GateType::Or => left | right,
-            };
-
-            vals.insert(gate.output.clone(), result);
-            removing = Some(i);
-            break;
-        }
-
-        gates.remove(removing.unwrap());
-    }
-
-    let mut z_vals = Vec::new();
-
-    for val in vals.iter() {
-        if val.0.starts_with("z") {
-            z_vals.push(val);
-        }
-    }
-
-    z_vals.sort_by(|a, b| {
-        let a = a.0.chars().skip(1).collect::<String>().parse::<u32>().unwrap();
-        let b = b.0.chars().skip(1).collect::<String>().parse::<u32>().unwrap();
-
-        b.cmp(&a)
-    });
-
-    let mut final_str = String::new();
-    for val in z_vals {
-        final_str.push(if *val.1 { '1' } else { '0' });
-    }
-
-    println!("{}", final_str);
-
-    // convert the binary string to a number
-    let final_num = u64::from_str_radix(&final_str, 2).unwrap();
-
-    let xored = final_num ^ z_num;
-
-    println!("{:046b}", xored);
-
-    println!("Final number: {}", final_num);
 }
