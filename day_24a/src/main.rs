@@ -1,16 +1,30 @@
-use std::collections::HashMap;
+#![feature(exact_size_is_empty)]
+#![feature(let_chains)]
 
 use itertools::Itertools;
 use rayon::prelude::*;
 use rand::prelude::*;
-use cached::proc_macro::cached;
+//use cached::proc_macro::cached;
+use array_init::from_iter;
+use hashbrown::{HashMap, HashSet};
+
+// NOTE: 100 for speed. 150-200 for reliability. (100 will not always return a solution)
+const TOP_X_SEARCH: usize = 150;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Gate {
+pub struct StrGate {
     pub gate: GateType,
     pub left: String,
     pub right: String,
     pub output: String,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct Gate {
+    pub gate: GateType,
+    pub left: usize,
+    pub right: usize,
+    pub output: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,9 +45,12 @@ impl GateType {
     }
 }
 
-type Gates = HashMap<String, Gate>;
-type Swap = (String, String);
+type WireConversions = HashMap<usize, String>;
+type WCBack = HashMap<String, usize>;
+type Gates = Vec<Option<Gate>>;
+type Swap = (usize, usize);
 type Swaps = [Swap; 4];
+type Vals = Vec<Option<bool>>;
 
 fn main() {
     use std::time::Instant;
@@ -63,14 +80,26 @@ fn main() {
     println!("\nPART 2 took: {:.2?}", time_taken);
 }
 
-fn part_1(input: &str) -> u64 {
-    let (gates, vals, _, _) = get_vals_and_gates(input);
-
-    get_true_output(&gates, vals)
+fn generate_wire_conversions(wires: Vec<String>) -> (WireConversions, WCBack) {
+    let mut n = 0;
+    let mut f = WireConversions::with_capacity(wires.len());
+    let mut b = WCBack::with_capacity(wires.len());
+    for wire in wires {
+        f.insert(n, wire.clone());
+        b.insert(wire, n);
+        n += 1;
+    }
+    (f, b)
 }
 
-fn get_vals_and_gates(input: &str) -> (Gates, HashMap<String, bool>, u64, u64) {
-    let mut vals = HashMap::new();
+fn part_1(input: &str) -> u64 {
+    let (gates, vals, _, _, wc_front, _) = get_vals_and_gates(input);
+
+    run_with_swaps(&gates, &vals, &blank_swaps(), &wc_front)
+}
+
+fn get_vals_and_gates(input: &str) -> (Gates, Vals, u64, u64, WireConversions, WCBack) {
+    let mut vals = HashMap::with_capacity(350);
 
     let parts = input.split("\n\n").collect::<Vec<&str>>();
 
@@ -104,9 +133,20 @@ fn get_vals_and_gates(input: &str) -> (Gates, HashMap<String, bool>, u64, u64) {
     let x_num = u64::from_str_radix(&x_str, 2).unwrap();
     let y_num = u64::from_str_radix(&y_str, 2).unwrap();
 
-    let mut gates = HashMap::new();
+    let gate_lines = parts[1].split('\n');
 
-    for gate in parts[1].split('\n') {
+    let lines_len = match gate_lines.try_len() {
+        Ok(l) => l,
+        Err(e) => {
+            if let Some(l) = e.1 { l } else { e.0 }
+        }
+    };
+
+    let mut gates = HashMap::with_capacity(lines_len);
+
+    let mut wires = HashSet::new();
+
+    for gate in gate_lines {
         let mut parts = gate.split(' ');
 
         let left = parts.next().unwrap().to_string();
@@ -114,7 +154,11 @@ fn get_vals_and_gates(input: &str) -> (Gates, HashMap<String, bool>, u64, u64) {
         let right = parts.next().unwrap().to_string();
         let output = parts.last().unwrap().to_string();
 
-        gates.insert(output.clone(), Gate {
+        wires.insert(left.clone());
+        wires.insert(right.clone());
+        wires.insert(output.clone());
+
+        gates.insert(output.clone(), StrGate {
             gate: GateType::from_str(&gate),
             left,
             right,
@@ -122,74 +166,76 @@ fn get_vals_and_gates(input: &str) -> (Gates, HashMap<String, bool>, u64, u64) {
         });
     }
 
-    (gates, vals, x_num, y_num)
-}
+    let (wc_front, wc_back) = generate_wire_conversions(wires.into_iter().collect());
 
-fn get_true_output(gates: &Gates, mut vals: HashMap<String, bool>) -> u64 {
-    let mut completed_gates = 0;
+    let mut max_out = 0;
+    let gates_iter = gates.into_iter().map(|(i, gate)| {
+        let idx = *wc_back.get(&i).unwrap();
 
-    let mut current_gate = 0;
-    let gs = gates.values().collect::<Vec<_>>();
-    while completed_gates < gates.len() {
-        let gate = gs.get(current_gate).unwrap();
-
-        if vals.contains_key(&gate.left) && vals.contains_key(&gate.right) && !vals.contains_key(&gate.output) {
-            completed_gates += 1;
-            let left = *vals.get(&gate.left).unwrap();
-            let right = *vals.get(&gate.right).unwrap();
-
-            let val = match gate.gate {
-                GateType::And => left && right,
-                GateType::Or => left || right,
-                GateType::Xor => left ^ right,
-            };
-
-            vals.insert(gate.output.clone(), val);
+        if idx > max_out {
+            max_out = idx;
         }
+        
+        (idx, Gate {
+            gate: gate.gate,
+            left: *wc_back.get(&gate.left).unwrap(),
+            right: *wc_back.get(&gate.right).unwrap(),
+            output: *wc_back.get(&gate.output).unwrap()
+        })
+    }).collect::<Vec<_>>();
 
-        current_gate += 1;
-        if current_gate >= gates.len() {
-            current_gate = 0;
-        }
-    }
+    let gates_len = max_out+1;
+    let mut gates = Vec::with_capacity(gates_len);
+    gates.resize(gates_len, None);
+    gates_iter.into_iter().for_each(|g|gates[g.0] = Some(g.1));
 
-    let mut zs = Vec::new();
-    for v in vals {
-        if v.0.starts_with('z') {
-            zs.push(v);
-        }
-    }
+    let vals_iter = vals.into_iter().map(|(i, val)| {
+        let idx = *wc_back.get(&i).unwrap();
+        (idx, val)
+    }).collect::<Vec<_>>();
 
-    zs.sort_by(|a,b| {
-        a.0.cmp(&b.0)
-    });
+    let vals_len = 350;
+    let mut vals = Vec::with_capacity(vals_len);
+    vals.resize(vals_len, None);
+    vals_iter.into_iter().for_each(|v|vals[v.0] = Some(v.1));
 
-    zs.reverse();
-
-    let mut z_val = 0;
-    for z in zs {
-        z_val *= 2;
-        z_val += if z.1 { 1 } else { 0 };
-    }
-
-    z_val
+    (gates, vals, x_num, y_num, wc_front, wc_back)
 }
 
 fn part_2(input: &str) -> String {
-    let (gates, vals, x_num, y_num) = get_vals_and_gates(input);
+    let (gates, vals, x_num, y_num, wc_front, wc_back) = get_vals_and_gates(input);
 
     let z_num = x_num + y_num;
 
-    let wires = get_all_wires(&gates).into_iter().cloned().collect::<Vec<_>>();
+    let testing_vals = gen_testing_vals(&wc_back);
+
+    let scored_pairs = scored_pairs(&gates, &testing_vals, &wc_front);
+
+    let scored_doubles = scored_doubles(scored_pairs, &gates, &testing_vals, &wc_front);
+
+    let swaps = get_swaps(scored_doubles);
+    let scoring_vals = gen_scoring_vals(20, &wc_back);
+
+    let final_swap = final_swap(swaps, &scoring_vals, &gates, &vals, z_num, &testing_vals, &wc_front);
+
+    final_swap.unwrap().into_iter()
+    .flat_map(|(a,b)|[a,b])
+    .map(|i|wc_front.get(&i).unwrap())
+    .sorted()
+    .join(",")
+}
+
+fn scored_pairs(gates: &Gates, testing_vals: &[(Vals, u64); POW_LIST.len()], wc: &WireConversions) -> impl Iterator<Item = (u64, Swap)> {
+    let wires = get_all_wires(&gates).into_iter().collect::<Vec<_>>();
 
     let swaps = blank_swaps();
 
     let pairs = generate_all_pairs(&wires);
 
-    let scored_pairs = pairs.into_par_iter().map(|pair| {
+    pairs.into_par_iter().map(|pair| {
         let mut swaps = swaps.clone();
         swaps[0] = pair;
-        let score = check_bits_correct(&gates, &swaps);
+        let score = check_bits_correct(&gates, &swaps, testing_vals, wc);
         let pair = swaps.into_iter().nth(0).unwrap();
         (score, pair)
     })
@@ -198,10 +244,16 @@ fn part_2(input: &str) -> String {
     .sorted_by(|(a, _), (b, _)| {
         b.cmp(a)
     })
-    .take(200);
+    .take(TOP_X_SEARCH)
+}
 
+fn scored_doubles<T>(scored_pairs: T, gates: &Gates, testing_vals: &[(Vals, u64); POW_LIST.len()], wc: &WireConversions) -> impl Iterator<Item = (u64, (Swap, Swap))>
+where
+    T: Iterator<Item = (u64, Swap)>,
+{
+    let swaps = blank_swaps();
     let toups = all_pairs(scored_pairs).collect::<Vec<_>>();
-    let scored_doubles = toups.into_par_iter().map(|((_, uno), (_, dos))| {
+    toups.into_par_iter().map(|((_, uno), (_, dos))| {
         let mut swaps = swaps.clone();
 
         let one = uno.clone();
@@ -209,7 +261,7 @@ fn part_2(input: &str) -> String {
 
         swaps[0] = uno;
         swaps[1] = dos;
-        let score = check_bits_correct(&gates, &swaps);
+        let score = check_bits_correct(&gates, &swaps, testing_vals, wc);
         (score, (one, two))
     })
     .collect::<Vec<_>>()
@@ -217,33 +269,32 @@ fn part_2(input: &str) -> String {
     .sorted_by(|(a, _), (b, _)| {
         b.cmp(a)
     })
-    .take(200)
-    .collect::<Vec<_>>();
+    .take(TOP_X_SEARCH)
+}
 
-    let swaps = all_pairs(scored_doubles).map(|((_, (a, b)), (_, (c, d)))| {
+fn get_swaps<T>(scored_doubles: T) -> Vec<Swaps>
+where
+    T: Iterator<Item = (u64, (Swap, Swap))>
+{
+    all_pairs(scored_doubles).map(|((_, (a, b)), (_, (c, d)))| {
         [
             a,
             b,
             c,
             d
         ]
-    }).collect::<Vec<_>>();
+    }).collect::<Vec<_>>()
+}
 
-    let scoring_vals = gen_scoring_vals(20);
-
-    let final_swap = swaps.into_par_iter().find_any(|swaps| {
-        let score = check_bits_correct(&gates, &swaps);
-        let actual = run_with_swaps(&gates, vals.clone(), swaps);
+fn final_swap(swaps: Vec<Swaps>, scoring_vals: &Vec<(Vals, u64)>, gates: &Gates, vals: &Vals, z_num: u64, testing_vals: &[(Vals, u64); POW_LIST.len()], wc: &WireConversions) -> Option<Swaps> {
+    swaps.into_par_iter().find_any(|swaps| {
+        let score = check_bits_correct(&gates, &swaps, testing_vals, wc);
+        let actual = run_with_swaps(&gates, vals, swaps, wc);
         let actual_is_correct = actual == z_num;
-        let fuzzy_score = score_gene(swaps, &gates, &scoring_vals);
+        let fuzzy_score = score_gene(swaps, &gates, &scoring_vals, wc);
 
         score == 45 && actual_is_correct && fuzzy_score == 0
-    });
-
-    let mut f = final_swap.unwrap().into_iter().flat_map(|(a,b)|[a,b]).collect::<Vec<_>>();
-    f.sort();
-
-    f.join(",")
+    })
 }
 
 #[inline]
@@ -261,7 +312,7 @@ fn all_pairs<T: Clone>(iter: impl IntoIterator<Item = T>) -> impl Iterator<Item 
     out.into_iter()
 }
 
-fn generate_all_pairs(wires: &[String]) -> Vec<Swap> {
+fn generate_all_pairs(wires: &[usize]) -> Vec<Swap> {
     let mut pairs = Vec::with_capacity((wires.len() * (wires.len() - 1)) >> 1);
 
     for i in 0..wires.len() {
@@ -281,12 +332,13 @@ fn generate_all_pairs(wires: &[String]) -> Vec<Swap> {
 
 #[inline]
 fn blank_swaps() -> Swaps {
+    let m = usize::MAX;
     [
-        ("", ""),
-        ("", ""),
-        ("", ""),
-        ("", "")
-    ].map(|(a,b)|(a.to_string(),b.to_string()))
+        (m, m),
+        (m, m),
+        (m, m),
+        (m, m)
+    ]
 }
 
 fn bits_diff(v1: u64, v2: u64) -> u8 {
@@ -301,24 +353,28 @@ fn bits_diff(v1: u64, v2: u64) -> u8 {
     diff
 }
 
-#[cached]
-fn gen_vals(x: u64, y: u64) -> HashMap<String, bool> {
-    let mut vals = HashMap::new();
+//#[cached]
+fn gen_vals(x: u64, y: u64, wc: &WCBack) -> Vals {
+    let mut vals = Vec::with_capacity(350);
+    vals.resize(350, None);
 
     for i in 0..45 {
         let x_bit_val = (x & (1 << i)) > 0;
         let y_bit_val = (y & (1 << i)) > 0;
         let x = format!("x{:02}", i);
         let y = format!("y{:02}", i);
-        vals.insert(x, x_bit_val);
-        vals.insert(y, y_bit_val);
+        let x = *wc.get(&x).unwrap();
+        let y = *wc.get(&y).unwrap();
+        if x > vals.len() { vals.resize(x+1, None); }
+        if y > vals.len() { vals.resize(y+1, None); }
+        vals[x] = Some(x_bit_val);
+        vals[y] = Some(y_bit_val);
     }
 
     vals
 }
 
-fn gen_scoring_vals(gen_amount: usize) -> Vec<(HashMap<String, bool>, u64)> {
-
+fn gen_scoring_vals(gen_amount: usize, wc: &WCBack) -> Vec<(Vals, u64)> {
     let mut rng = rand::rng();
     let mut s = Vec::with_capacity(gen_amount);
 
@@ -327,7 +383,7 @@ fn gen_scoring_vals(gen_amount: usize) -> Vec<(HashMap<String, bool>, u64)> {
         let x = rng.random::<u64>() & bits_45;
         let y = rng.random::<u64>() & bits_45;
         let z = x + y;
-        let vals = gen_vals(x, y);
+        let vals = gen_vals(x, y, wc);
 
         s.push((vals, z))
     }
@@ -335,11 +391,11 @@ fn gen_scoring_vals(gen_amount: usize) -> Vec<(HashMap<String, bool>, u64)> {
     s
 }
 
-fn score_gene(swaps: &Swaps, gates: &Gates, scoring_vals: &Vec<(HashMap<String, bool>, u64)>) -> u64 {
+fn score_gene(swaps: &Swaps, gates: &Gates, scoring_vals: &Vec<(Vals, u64)>, wc: &WireConversions) -> u64 {
        let mut total_score = 0;
 
     for (vals, wanted) in scoring_vals {
-        let s = run_with_swaps(gates, vals.clone(), swaps);
+        let s = run_with_swaps(gates, vals, swaps, wc);
 
         let this_score = bits_diff(*wanted, s) as u64;
 
@@ -349,54 +405,100 @@ fn score_gene(swaps: &Swaps, gates: &Gates, scoring_vals: &Vec<(HashMap<String, 
     total_score
 }
 
-fn get_all_wires<'a>(gates: &'a Gates) -> Vec<&'a String> {
+fn get_all_wires(gates: &Gates) -> Vec<usize> {
     let mut wires = Vec::new();
-    for (_, gate) in gates {
-        wires.push(&gate.output);
+    for gate in gates {
+        if let Some(g) = gate { wires.push(g.output); }
     }
     wires
 }
 
-#[inline]
-fn get_actual_from_swaps<'a>(swaps: &'a Swaps, a: &'a str) -> &'a str {
-    for s in swaps {
-        if a == s.0 {
-            return &s.1;
-        }
-        if a == s.1 {
-            return &s.0;
-        }
-    }
+//#[inline]
+fn check_swap(swap: &Swap, a: usize) -> Option<usize> {
+    Some(if swap.0 == a { swap.1 }
+    else if swap.1 == a { swap.0 }
+    else { return None })
+}
+
+//#[inline]
+fn get_actual_from_swaps(swaps: &Swaps, a: usize) -> usize {
+    if let Some(s) = check_swap(&swaps[0], a) { return s }
+    if let Some(s) = check_swap(&swaps[1], a) { return s }
+    if let Some(s) = check_swap(&swaps[2], a) { return s }
+    if let Some(s) = check_swap(&swaps[3], a) { return s }
 
     a
 }
 
-#[inline]
-fn swap_vals_contains(vals: &HashMap<String, bool>, v: &str, swaps: &Swaps) -> bool {
+#[cfg_attr(not(debug_assertions), inline)]
+fn swap_vals_contains(vals: &Vals, vals2: &Vals, v: usize, swaps: &Swaps) -> bool {
     let v = get_actual_from_swaps(swaps, v);
-    vals.contains_key(v)
+    let v = vals_contains(vals, vals2, v);
+    v
 }
 
-fn run_with_swaps(gates: &Gates, mut vals: HashMap<String, bool>, swaps: &Swaps) -> u64 {
-    let mut gates = gates.clone();
-    let mut since_last_complete = 0;
+#[cfg_attr(not(debug_assertions), inline)]
+fn vals_contains(starting_vals: &Vals, our_vals: &Vals, s: usize) -> bool {
+    iv_contains(starting_vals, s) || iv_contains(our_vals, s)
+}
 
+#[inline]
+fn iv_contains(v: &Vals, s: usize) -> bool {
+    v[s].is_some()
+}
+
+#[cfg_attr(not(debug_assertions), inline)]
+fn vals_get(starting_vals: &Vals, our_vals: &Vals, s: usize) -> Option<bool> {
+    return Some(if let Some(Some(b)) = our_vals.get(s) {
+        *b
+    } else if let Some(Some(b)) = starting_vals.get(s) {
+        *b
+    } else {
+        return None;
+    })
+}
+
+fn run_with_swaps(gates: &Gates, starting_vals: &Vals, swaps: &Swaps, wc: &WireConversions) -> u64 {
+    let mut since_last_complete = 0;
+    let len = gates.len();
+
+    let sv = starting_vals;
+    let ov_len = gates.len();
+    let mut ov = Vec::with_capacity(ov_len);
+    ov.resize(ov_len, None);
+    let mut completed = 0;
     let mut current_gate = 0;
-    while gates.len() > 0 {
-        if since_last_complete > gates.len() {
+
+    let actual_len = gates.iter().fold(0, |a,g|{
+        if g.is_some() { a + 1 } else { a }
+    });
+
+    loop {
+        if since_last_complete > actual_len {
             return 0;
         }
-        since_last_complete += 1;
 
-        if current_gate >= gates.len() {
+        if current_gate >= len {
             current_gate = 0;
         }
-        let gate = gates.iter().nth(current_gate).unwrap().1;
+        let gate = gates.get(current_gate).unwrap();
 
-        if vals.contains_key(&gate.left) && vals.contains_key(&gate.right) && !swap_vals_contains(&vals, &gate.output, swaps) {
+        let gate = 
+        if let Some(gate) = gate { gate }
+        else {
+            current_gate += 1;
+            continue;
+        };
+        since_last_complete += 1;
+
+        let has_left = vals_contains(sv, &ov, gate.left);
+        let has_right = vals_contains(sv, &ov, gate.right);
+        let has_out = swap_vals_contains(sv, &ov, gate.output, swaps);
+
+        if has_left && has_right && !has_out {
             since_last_complete = 0;
-            let left = *vals.get(&gate.left).unwrap();
-            let right = *vals.get(&gate.right).unwrap();
+            let left = vals_get(sv, &ov, gate.left).unwrap();
+            let right = vals_get(sv, &ov, gate.right).unwrap();
 
             let val = match gate.gate {
                 GateType::And => left && right,
@@ -404,21 +506,25 @@ fn run_with_swaps(gates: &Gates, mut vals: HashMap<String, bool>, swaps: &Swaps)
                 GateType::Xor => left ^ right,
             };
 
-            let out = get_actual_from_swaps(swaps, &gate.output).to_string();
-            let actual_out = gate.output.clone();
+            let out = get_actual_from_swaps(swaps, gate.output);
 
-            gates.remove(&actual_out);
-            vals.insert(out, val);
-            current_gate = 0;
-        } else {
-            current_gate += 1;
+            ov[out] = Some(val);
+            completed += 1;
+            if completed >= actual_len {
+                break;
+            }
         }
+
+        current_gate += 1;
     }
 
     let mut zs = Vec::new();
-    for v in vals {
-        if v.0.starts_with('z') {
-            zs.push(v);
+    for v in ov.iter().enumerate() {
+        let s = wc.get(&v.0);
+        if let Some(s) = s && let Some(v) = v.1 {
+            if s.starts_with('z') {
+                zs.push((s, *v));
+            }
         }
     }
 
@@ -485,18 +591,24 @@ const POW_LIST: [u64; 45] = [
     17592186044416,
 ];
 
-fn check_bits_correct(gates: &Gates, swaps: &Swaps) -> u64 {
-    let mut total = 0;
-
-    for i in POW_LIST {
+fn gen_testing_vals(wc: &WCBack) -> [(Vals, u64); POW_LIST.len()] {
+    let i = POW_LIST.into_iter().map(|i| {
         let n = i;
         let n2 = n*2;
 
-        let vals = gen_vals(n, n);
+        (gen_vals(n, n, wc), n2)        
+    });
 
-        let result = run_with_swaps(gates, vals, swaps);
+    from_iter(i).unwrap()
+}
 
-        let correct = result - n2 == 0;
+fn check_bits_correct(gates: &Gates, swaps: &Swaps, testing_vals: &[(Vals, u64); POW_LIST.len()], wc: &WireConversions) -> u64 {
+    let mut total = 0;
+
+    for (vals, n2) in testing_vals {
+        let result = run_with_swaps(gates, vals, swaps, wc);
+
+        let correct = result == *n2;
 
         if correct { total += 1; }
     }
