@@ -1,15 +1,18 @@
 #![feature(exact_size_is_empty)]
 #![feature(let_chains)]
 
+use std::{collections::BTreeMap, sync::Arc};
+
 use itertools::Itertools;
 use rayon::prelude::*;
 use rand::prelude::*;
 //use cached::proc_macro::cached;
 use array_init::from_iter;
-use hashbrown::{HashMap, HashSet};
+use hashbrown::HashMap;
 
-// NOTE: 100 for speed. 150-200 for reliability. (100 will not always return a solution)
-const TOP_X_SEARCH: usize = 150;
+// the lower, the lower scores will be allowed.
+const TOP_X_SEARCH_SCORED_PAIRS: usize = 40;
+const TOP_X_SEARCH_SCORED_DOUBLES: usize = 42;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct StrGate {
@@ -45,8 +48,8 @@ impl GateType {
     }
 }
 
-type WireConversions = HashMap<usize, String>;
-type WCBack = HashMap<String, usize>;
+type WireConversions = BTreeMap<usize, String>;
+type WCBack = BTreeMap<String, usize>;
 type Gates = Vec<Option<Gate>>;
 type Swap = (usize, usize);
 type Swaps = [Swap; 4];
@@ -78,18 +81,6 @@ fn main() {
 
     let time_taken = p2_start.elapsed();
     println!("\nPART 2 took: {:.2?}", time_taken);
-}
-
-fn generate_wire_conversions(wires: Vec<String>) -> (WireConversions, WCBack) {
-    let mut n = 0;
-    let mut f = WireConversions::with_capacity(wires.len());
-    let mut b = WCBack::with_capacity(wires.len());
-    for wire in wires {
-        f.insert(n, wire.clone());
-        b.insert(wire, n);
-        n += 1;
-    }
-    (f, b)
 }
 
 fn part_1(input: &str) -> u64 {
@@ -144,7 +135,8 @@ fn get_vals_and_gates(input: &str) -> (Gates, Vals, u64, u64, WireConversions, W
 
     let mut gates = HashMap::with_capacity(lines_len);
 
-    let mut wires = HashSet::new();
+    let (mut wc_front, mut wc_back) = (WireConversions::new(), WCBack::new());
+    let mut n = 0;
 
     for gate in gate_lines {
         let mut parts = gate.split(' ');
@@ -154,9 +146,18 @@ fn get_vals_and_gates(input: &str) -> (Gates, Vals, u64, u64, WireConversions, W
         let right = parts.next().unwrap().to_string();
         let output = parts.last().unwrap().to_string();
 
-        wires.insert(left.clone());
-        wires.insert(right.clone());
-        wires.insert(output.clone());
+        #[inline]
+        fn insert_wire(w: String, wc_front: &mut WireConversions, wc_back: &mut WCBack, n: &mut usize) {
+            wc_back.entry(w.clone()).or_insert_with(|| {
+                *n += 1;
+                wc_front.insert(*n, w);
+                *n
+            });
+        }
+
+        insert_wire(left.clone(), &mut wc_front, &mut wc_back, &mut n);
+        insert_wire(right.clone(), &mut wc_front, &mut wc_back, &mut n);
+        insert_wire(output.clone(), &mut wc_front, &mut wc_back, &mut n);
 
         gates.insert(output.clone(), StrGate {
             gate: GateType::from_str(&gate),
@@ -165,8 +166,6 @@ fn get_vals_and_gates(input: &str) -> (Gates, Vals, u64, u64, WireConversions, W
             output,
         });
     }
-
-    let (wc_front, wc_back) = generate_wire_conversions(wires.into_iter().collect());
 
     let mut max_out = 0;
     let gates_iter = gates.into_iter().map(|(i, gate)| {
@@ -204,7 +203,6 @@ fn get_vals_and_gates(input: &str) -> (Gates, Vals, u64, u64, WireConversions, W
 
 fn part_2(input: &str) -> String {
     let (gates, vals, x_num, y_num, wc_front, wc_back) = get_vals_and_gates(input);
-
     let z_num = x_num + y_num;
 
     let testing_vals = gen_testing_vals(&wc_back);
@@ -214,9 +212,10 @@ fn part_2(input: &str) -> String {
     let scored_doubles = scored_doubles(scored_pairs, &gates, &testing_vals, &wc_front);
 
     let swaps = get_swaps(scored_doubles);
+
     let scoring_vals = gen_scoring_vals(20, &wc_back);
 
-    let final_swap = final_swap(swaps, &scoring_vals, &gates, &vals, z_num, &testing_vals, &wc_front);
+    let final_swap = final_swap(swaps, &scoring_vals, &gates, &vals, z_num, &wc_front);
 
     final_swap.unwrap().into_iter()
     .flat_map(|(a,b)|[a,b])
@@ -225,35 +224,31 @@ fn part_2(input: &str) -> String {
     .join(",")
 }
 
-fn scored_pairs(gates: &Gates, testing_vals: &[(Vals, u64); POW_LIST.len()], wc: &WireConversions) -> impl Iterator<Item = (u64, Swap)> {
+fn scored_pairs<'a>(gates: &'a Gates, testing_vals: &'a [(Vals, u64); POW_LIST.len()], wc: &'a WireConversions) -> impl ParallelIterator<Item = (u64, Swap)> + 'a {
     let wires = get_all_wires(&gates).into_iter().collect::<Vec<_>>();
 
-    let swaps = blank_swaps();
-
     let pairs = generate_all_pairs(&wires);
-
-    pairs.into_par_iter().map(|pair| {
-        let mut swaps = swaps.clone();
+    
+    let r = pairs.into_par_iter().map(move |pair| {
+        let mut swaps = blank_swaps();
         swaps[0] = pair;
         let score = check_bits_correct(&gates, &swaps, testing_vals, wc);
         let pair = swaps.into_iter().nth(0).unwrap();
         (score, pair)
     })
-    .collect::<Vec<_>>()
-    .into_iter()
-    .sorted_by(|(a, _), (b, _)| {
-        b.cmp(a)
-    })
-    .take(TOP_X_SEARCH)
+    .filter(|(a, _)| *a >= TOP_X_SEARCH_SCORED_PAIRS as u64);
+
+    r
 }
 
-fn scored_doubles<T>(scored_pairs: T, gates: &Gates, testing_vals: &[(Vals, u64); POW_LIST.len()], wc: &WireConversions) -> impl Iterator<Item = (u64, (Swap, Swap))>
+fn scored_doubles<'a, T>(scored_pairs: T, gates: &'a Gates, testing_vals: &'a [(Vals, u64); POW_LIST.len()], wc: &'a WireConversions) -> impl ParallelIterator<Item = (u64, (Swap, Swap))> + 'a
 where
-    T: Iterator<Item = (u64, Swap)>,
+    T: ParallelIterator<Item = (u64, Swap)>,
 {
     let swaps = blank_swaps();
     let toups = all_pairs(scored_pairs).collect::<Vec<_>>();
-    toups.into_par_iter().map(|((_, uno), (_, dos))| {
+
+    toups.into_par_iter().map(move |((_, uno), (_, dos))| {
         let mut swaps = swaps.clone();
 
         let one = uno.clone();
@@ -264,17 +259,12 @@ where
         let score = check_bits_correct(&gates, &swaps, testing_vals, wc);
         (score, (one, two))
     })
-    .collect::<Vec<_>>()
-    .into_iter()
-    .sorted_by(|(a, _), (b, _)| {
-        b.cmp(a)
-    })
-    .take(TOP_X_SEARCH)
+    .filter(|(a, _)| *a >= TOP_X_SEARCH_SCORED_DOUBLES as u64)
 }
 
-fn get_swaps<T>(scored_doubles: T) -> Vec<Swaps>
+fn get_swaps<T>(scored_doubles: T) -> impl ParallelIterator<Item = Swaps>
 where
-    T: Iterator<Item = (u64, (Swap, Swap))>
+    T: ParallelIterator<Item = (u64, (Swap, Swap))>
 {
     all_pairs(scored_doubles).map(|((_, (a, b)), (_, (c, d)))| {
         [
@@ -283,33 +273,38 @@ where
             c,
             d
         ]
-    }).collect::<Vec<_>>()
+    })
 }
 
-fn final_swap(swaps: Vec<Swaps>, scoring_vals: &Vec<(Vals, u64)>, gates: &Gates, vals: &Vals, z_num: u64, testing_vals: &[(Vals, u64); POW_LIST.len()], wc: &WireConversions) -> Option<Swaps> {
-    swaps.into_par_iter().find_any(|swaps| {
-        let score = check_bits_correct(&gates, &swaps, testing_vals, wc);
+fn final_swap<T>(swaps: T, scoring_vals: &Vec<(Vals, u64)>, gates: &Gates, vals: &Vals, z_num: u64, wc: &WireConversions) -> Option<Swaps>
+where
+    T: ParallelIterator<Item = Swaps>
+{
+    swaps.find_any(|swaps| {
         let actual = run_with_swaps(&gates, vals, swaps, wc);
         let actual_is_correct = actual == z_num;
         let fuzzy_score = score_gene(swaps, &gates, &scoring_vals, wc);
 
-        score == 45 && actual_is_correct && fuzzy_score == 0
+        /*score == 45 &&*/ actual_is_correct && fuzzy_score == 0
     })
 }
 
 #[inline]
-fn all_pairs<T: Clone>(iter: impl IntoIterator<Item = T>) -> impl Iterator<Item = (T, T)> {
-    let items: Vec<T> = iter.into_iter().collect();
+fn all_pairs<T: Clone + Send + Sync + 'static>(
+    par_iter: impl ParallelIterator<Item = T>
+) -> impl ParallelIterator<Item = (T, T)> {
+    let items: Arc<[T]> = par_iter.collect::<Vec<_>>().into(); // Arc slice
     let len = items.len();
-    let mut out: Vec<(T, T)> = Vec::with_capacity(len * (len-1) >> 1);
-    for i in 0..items.len() {
-        let item = items.get(i).unwrap().clone();
-        for j in i..items.len() {
-            let inner_item = items.get(j).unwrap().clone();
-            out.push((item.clone(), inner_item));
-        }
-    }
-    out.into_iter()
+    let items_clone = Arc::clone(&items); // Clone once for move into closure
+
+    (0..len).into_par_iter().flat_map(move |i| {
+        let item = items[i].clone(); // ok now, shared via Arc
+        let items = Arc::clone(&items_clone); // clone for this sub-closure
+        (i..len).into_par_iter().map(move |j| {
+            let inner_item = items[j].clone();
+            (item.clone(), inner_item)
+        })
+    })
 }
 
 fn generate_all_pairs(wires: &[usize]) -> Vec<Swap> {
